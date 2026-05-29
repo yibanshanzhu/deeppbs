@@ -41,43 +41,185 @@ git log --oneline -3
 
 ```bash
 export EXP_ROOT=$HOME/deeppbs_contact_aware_exp
+export RAW_CIF=$EXP_ROOT/raw_cif
+export PDB_DIR=$EXP_ROOT/pdb_chain_cif
 export NPZ_DIR=$EXP_ROOT/assembly
 export OUT_DIR=$EXP_ROOT/output
 export FOLD_DIR=$EXP_ROOT/folds
 
-mkdir -p "$NPZ_DIR" "$OUT_DIR" "$FOLD_DIR"
+mkdir -p "$RAW_CIF" "$PDB_DIR" "$NPZ_DIR" "$OUT_DIR" "$FOLD_DIR"
 ```
 
-## 2. 确认原始输入
+## 2. 从原 DeepPBS 数据还原输入
 
-需要两类原始输入：
-
-| 输入 | 作用 |
-|---|---|
-| co-crystal PDB/mmCIF 文件目录 | `process_co_crystal.py` 读取结构 |
-| PDB/PWM 对应表 | 每行 `pdb_file,pwm_id` |
-
-例子：
-
-```text
-1abc.pdb,MA0001.1.jaspar
-2xyz.cif,TF_NAME.H11MO.0.A
-```
-
-设置路径：
+本地没有完整保存 656 个 co-crystal 原始 PDB/mmCIF。现有数据位置：
 
 ```bash
-export PDB_DIR=/path/to/original_pdb_or_cif_dir
-export INPUT_LIST=/path/to/original_cocrystal_pwm_list.csv
+export ORIG_DEEPPBS_DATA=$HOME/deeppbs_repro/deeppbs_data/deeppbsmar24
 ```
 
-先检查：
+主要文件：
+
+| 路径 | 作用 |
+|---|---|
+| `$ORIG_DEEPPBS_DATA/run/folds/` | 原 DeepPBS fold / 样本列表 |
+| `$ORIG_DEEPPBS_DATA/data/assembly2024/` | 原 DeepPBS 已处理好的全量 `.npz` |
+| `$ORIG_DEEPPBS_DATA/run/process/pdb/` | demo/少量结构文件，不是全量 co-crystal |
+| `$ORIG_DEEPPBS_DATA/run/process/process_config.json` | 原处理配置 |
+
+注意：
+
+```text
+run/process/pdb/ 只有少量 demo 结构，不是完整原始结构目录。
+完整样本名在 run/folds/*.txt。
+原始 PDB/mmCIF 需要按 pdb_id 从 RCSB 重新下载。
+```
+
+检查原始 fold：
+
+```bash
+cd "$ORIG_DEEPPBS_DATA"
+ls run/folds/
+head run/folds/train0.txt
+head run/folds/valid0.txt
+```
+
+样本名示例：
+
+```text
+7jsl_J_MA0760.1.jaspar.npz
+```
+
+拆解为：
+
+| 字段 | 值 |
+|---|---|
+| `pdb_id` | `7jsl` |
+| `protein_chain` | `J` |
+| `pwm_id` | `MA0760.1.jaspar` |
+
+### 2.1 从 folds 生成处理输入表
+
+DeepPBS 的 `process_co_crystal.py` 输入表需要每行：
+
+```text
+pdb_file,pwm_id
+```
+
+我们用 `pdb_chain.cif` 作为 `pdb_file`，这样原代码里的 chain 解析逻辑仍然可用。
+
+```bash
+cd "$ORIG_DEEPPBS_DATA"
+
+python - <<'PY'
+from pathlib import Path
+import os
+
+root = Path(os.environ["ORIG_DEEPPBS_DATA"])
+out = Path(os.environ["EXP_ROOT"])
+samples = set()
+
+for f in (root / "run/folds").glob("*.txt"):
+    for line in f.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        stem = line[:-4] if line.endswith(".npz") else line
+        pdb_id, chain, pwm_id = stem.split("_", 2)
+        samples.add((pdb_id.lower(), chain, pwm_id))
+
+(out / "contact_aware_input.csv").write_text(
+    "\n".join(f"{pdb}_{chain}.cif,{pwm}" for pdb, chain, pwm in sorted(samples)) + "\n"
+)
+(out / "pdb_ids.txt").write_text(
+    "\n".join(sorted({pdb for pdb, _, _ in samples})) + "\n"
+)
+
+print("samples", len(samples))
+print("pdb_ids", len({pdb for pdb, _, _ in samples}))
+PY
+```
+
+设置输入表：
+
+```bash
+export INPUT_LIST=$EXP_ROOT/contact_aware_input.csv
+```
+
+检查：
+
+```bash
+test -f "$INPUT_LIST" && echo "INPUT_LIST ok"
+head "$INPUT_LIST"
+wc -l "$INPUT_LIST" "$EXP_ROOT/pdb_ids.txt"
+```
+
+### 2.2 从 RCSB 下载原始 CIF
+
+```bash
+cd "$RAW_CIF"
+
+while read pdb; do
+  test -f "${pdb}.cif" || curl -L -f "https://files.rcsb.org/download/${pdb^^}.cif" -o "${pdb}.cif"
+done < "$EXP_ROOT/pdb_ids.txt"
+```
+
+检查：
+
+```bash
+find "$RAW_CIF" -name "*.cif" | wc -l
+```
+
+### 2.3 创建 `pdb_chain.cif` 软链接
+
+`process_co_crystal.py` 会从文件名解析 chain：
+
+```text
+7jsl_J.cif -> chain J
+```
+
+所以需要把同一个 `7jsl.cif` 链接成不同 chain 名。
+
+```bash
+python - <<'PY'
+import os
+from pathlib import Path
+
+exp = Path(os.environ["EXP_ROOT"])
+raw = Path(os.environ["RAW_CIF"])
+pdb_dir = Path(os.environ["PDB_DIR"])
+
+for line in (exp / "contact_aware_input.csv").read_text().splitlines():
+    pdb_file, _ = line.split(",", 1)
+    pdb_id = pdb_file.split("_")[0]
+    src = raw / f"{pdb_id}.cif"
+    dst = pdb_dir / pdb_file
+    if not src.exists():
+        raise FileNotFoundError(src)
+    if dst.exists() or dst.is_symlink():
+        dst.unlink()
+    dst.symlink_to(src)
+
+print("linked", len(list(pdb_dir.glob("*.cif"))))
+PY
+```
+
+最终确认：
 
 ```bash
 test -d "$PDB_DIR" && echo "PDB_DIR ok"
 test -f "$INPUT_LIST" && echo "INPUT_LIST ok"
+find "$PDB_DIR" -name "*.cif" | wc -l
 head "$INPUT_LIST"
 ```
+
+到这里，真实输入是：
+
+| 变量 | 值 |
+|---|---|
+| `PDB_DIR` | `$EXP_ROOT/pdb_chain_cif` |
+| `INPUT_LIST` | `$EXP_ROOT/contact_aware_input.csv` |
+
 
 ## 3. 写新的处理配置
 
@@ -170,7 +312,7 @@ python - <<'PY'
 import os
 from pathlib import Path
 
-repo = Path.home() / "DeepPBS"
+orig = Path(os.environ["ORIG_DEEPPBS_DATA"])
 npz_dir = Path(os.environ["NPZ_DIR"])
 fold_dir = Path(os.environ["FOLD_DIR"])
 fold_dir.mkdir(parents=True, exist_ok=True)
@@ -179,7 +321,7 @@ available = {p.name for p in npz_dir.glob("*.npz")}
 
 for split in ["train", "valid"]:
     for i in range(5):
-        src = repo / "run" / "folds" / f"{split}{i}.txt"
+        src = orig / "run" / "folds" / f"{split}{i}.txt"
         dst = fold_dir / f"{split}{i}.txt"
         rows = [x.strip() for x in src.read_text().splitlines() if x.strip()]
         kept = [x for x in rows if x in available]
@@ -353,7 +495,7 @@ grep -E "validation|mae|IC|auroc|best" "$OUT_DIR"/contact_aware_fold*/run.log | 
 先做 `.npz` 级别对比：
 
 ```bash
-export BASELINE_NPZ_DIR=/path/to/original/deeppbs/assembly
+export BASELINE_NPZ_DIR=$ORIG_DEEPPBS_DATA/data/assembly2024
 
 python - <<'PY'
 import glob
