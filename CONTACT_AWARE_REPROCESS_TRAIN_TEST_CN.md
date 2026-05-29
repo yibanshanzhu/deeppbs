@@ -242,13 +242,51 @@ EOF
 cat run/process_config_contact_aware.json
 ```
 
-## 4. 先处理小样本验证
+## 4. 加载 DeepPBS 预处理依赖
+
+DeepPBS 的 DNA 预处理会调用 `x3dna-dssr`。如果没有把仓库里的 `dependencies/bin` 加到 `PATH`，`processDNA()` 会失败，并且早期脚本可能表现为没有生成任何 `.npz`。
+
+在每次新 shell / 新任务脚本里都执行：
+
+```bash
+cd ~/DeepPBS
+
+export PATH="$PWD/dependencies/bin:$PATH"
+export X3DNA="$PWD/x3dna-v2.3-linux-64bit/x3dna-v2.3"
+```
+
+确认：
+
+```bash
+which x3dna-dssr
+x3dna-dssr --help | head
+```
+
+期望看到：
+
+```text
+~/DeepPBS/dependencies/bin/x3dna-dssr
+```
+
+如果 `which x3dna-dssr` 没有输出：
+
+```bash
+ls -lh dependencies/bin/x3dna-dssr
+chmod +x dependencies/bin/x3dna-dssr
+export PATH="$PWD/dependencies/bin:$PATH"
+```
+
+## 5. 先处理小样本验证
 
 先不要直接全量跑。取前 5 个样本：
 
 ```bash
 head -5 "$INPUT_LIST" > "$EXP_ROOT/input_smoke.csv"
-python -W ignore run/process_co_crystal.py "$EXP_ROOT/input_smoke.csv" run/process_config_contact_aware.json
+
+python -W ignore run/process_co_crystal.py \
+  "$EXP_ROOT/input_smoke.csv" \
+  run/process_config_contact_aware.json \
+  2>&1 | tee "$EXP_ROOT/smoke_process.log"
 ```
 
 检查新 `.npz` 是否包含 contact-aware 字段：
@@ -281,7 +319,22 @@ PY
 
 如果这里失败，先不要全量重跑。
 
-## 5. 全量重新处理数据
+如果 `npz_count` 是 0，先看日志：
+
+```bash
+grep -E "PROCESSING|ERROR|CONTACT COUNT|Traceback" "$EXP_ROOT/smoke_process.log"
+```
+
+常见问题：
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| `FileNotFoundError: x3dna-dssr` | 没加载 `dependencies/bin` | 回到第 4 步设置 `PATH` |
+| 没有任何 `.npz` | 样本被异常跳过 | 看 `smoke_process.log` 的 `ERROR/Traceback` |
+| `structure load error` | CIF 软链接或下载失败 | 检查 `$PDB_DIR` 和 `$RAW_CIF` |
+| `contact-aware alignment error` | 该样本没有 contact-overlap window | 样本会被跳过，继续统计全量影响 |
+
+## 6. 全量重新处理数据
 
 确认 smoke test 通过后，清空 smoke 产物或换新目录：
 
@@ -303,7 +356,7 @@ grep -E "ERROR|CONTACT COUNT" "$EXP_ROOT/process_contact_aware.log" | tail -50
 find "$NPZ_DIR" -name "*.npz" | wc -l
 ```
 
-## 6. 生成可用 folds
+## 7. 生成可用 folds
 
 优先复用原始 folds，保证和 baseline 可比。但 contact-aware alignment 可能跳过部分样本，所以要过滤掉新目录里不存在的 `.npz`。
 
@@ -333,7 +386,7 @@ PY
 
 如果 missing 很多，需要先看处理日志，确认是不是 PDB 路径、PWM id 或 contact 过严导致。
 
-## 7. 写训练配置
+## 8. 写训练配置
 
 从原配置复制，只改 `data_dir` 和 `output_path`：
 
@@ -355,7 +408,7 @@ cp config.json config_contact_aware.json
 grep -E '"data_dir"|"output_path"|"epochs"|"batch_size"|"condition"' config_contact_aware.json
 ```
 
-## 8. 先训练 fold0
+## 9. 先训练 fold0
 
 先跑单折验证数据和训练流程：
 
@@ -376,7 +429,7 @@ ls -lh "$OUT_DIR/contact_aware_fold0"
 tail -80 "$OUT_DIR/contact_aware_fold0/run.log"
 ```
 
-## 9. 训练 5-fold
+## 10. 训练 5-fold
 
 单折没问题后跑 5 折。
 
@@ -399,9 +452,9 @@ wait
 
 如果用集群调度，按服务器资源管理方式把上面每个 fold 拆成一个 job。
 
-## 10. 基本测试和质控
+## 11. 基本测试和质控
 
-### 10.1 label contact overlap
+### 11.1 label contact overlap
 
 确认训练数据中所有 aligned region 都有 contact overlap：
 
@@ -425,7 +478,7 @@ assert not bad
 PY
 ```
 
-### 10.2 训练输出完整性
+### 11.2 训练输出完整性
 
 ```bash
 for i in 0 1 2 3 4
@@ -435,7 +488,7 @@ do
 done
 ```
 
-### 10.3 汇总 metrics
+### 11.3 汇总 metrics
 
 ```bash
 python - <<'PY'
@@ -480,7 +533,7 @@ PY
 grep -E "validation|mae|IC|auroc|best" "$OUT_DIR"/contact_aware_fold*/run.log | tail -100
 ```
 
-## 11. 和 baseline 对比
+## 12. 和 baseline 对比
 
 至少比较这些：
 
@@ -543,7 +596,7 @@ PY
 | validation 变好 | 支持新 alignment 策略 |
 | validation 变差 | 需要进一步看跳过样本数量、contact 定义和 label 长度分布 |
 
-## 12. 最小结论标准
+## 13. 最小结论标准
 
 只有同时满足下面条件，才算这轮实验有效：
 
