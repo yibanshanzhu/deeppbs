@@ -17,6 +17,7 @@ import json
 import os
 import numpy as np
 import random
+import traceback
 
 ## should be returned by processDNA
 intra_bp_parameters = ["buckle", "shear", "stretch", "stagger", "propeller", "opening"]
@@ -32,12 +33,16 @@ from deeppbs import getAtomSASA, getAtomDepth, getAchtleyFactors, getCV, countCo
 
 C = json.load(open(ARGS.config_file,"r")) 
 outdir = C.get("FEATURE_DATA_PATH", "./output")
+os.makedirs(outdir, exist_ok=True)
 
 for line in [l.strip() for l in open(ARGS.data_file,"r").readlines()]:
     try:
+        if not line:
+            continue
         if line[0] == "#":
             continue
         pdb_file = line.split(",")[0] # this should include file extension. Could be .ent, .pdb, .cif etc...
+        print("PROCESSING", pdb_file)
 
         if not ARGS.no_pwm:
             pwm_id = line.split(",")[1]
@@ -45,7 +50,8 @@ for line in [l.strip() for l in open(ARGS.data_file,"r").readlines()]:
 
         try:
             structure = StructureData(os.path.join(C["PDB_FILES_PATH"], pdb_file), name="co_crystal")
-        except:
+        except Exception as e:
+            print("ERROR: structure load error", pdb_file, e)
             continue
 
 
@@ -182,5 +188,8 @@ for line in [l.strip() for l in open(ARGS.data_file,"r").readlines()]:
             np.savez_compressed(os.path.join(outdir,"{}_{}.npz".format(pdb_file.split("/")[-1].replace(".pdb","").replace(".cif",""), pwm_id)), V_dna=V_dna, X_dna=X_dna, X_dna_point=X_dna_point, dna_feature_names=dna_feature_names, V_prot=V_prot, X_prot=X_prot, E_prot=E_prot, prot_feature_names=pro_features, Y_hard=dna_seq,Y_pwm=Y_pwm, pwm_mask=pwm_mask, dna_mask=dna_mask, aln_score=np.array([aln_score]), dna_vectors=dna_vectors, prot_vectors=prot_vectors, contacts=contacts, contact_mask=contact_mask, contact_counts=contact_counts)
         else:
             np.savez_compressed(os.path.join(outdir,"{}.npz".format(pdb_file.split("/")[-1].replace(".pdb","").replace(".cif",""))), V_dna=V_dna, X_dna=X_dna, X_dna_point=X_dna_point, dna_feature_names=dna_feature_names, V_prot=V_prot, X_prot=X_prot, E_prot=E_prot, prot_feature_names=pro_features, Y_hard=dna_seq,Y_pwm=Y_pwm, pwm_mask=pwm_mask, dna_mask=dna_mask, aln_score=np.array([aln_score]), dna_vectors=dna_vectors, prot_vectors=prot_vectors, contacts=contacts, contact_mask=contact_mask, contact_counts=contact_counts)
-    except:
+    except Exception as e:
+        label = pdb_file if "pdb_file" in locals() else line
+        print("ERROR: processing failed", label, e)
+        traceback.print_exc()
         continue
