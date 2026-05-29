@@ -1,14 +1,22 @@
 import numpy as np
 from .align_PWM_seq import alignPWMSeq
 
-def computeYAndMask(pwm, dna_seq):
+def computeYAndMask(pwm, dna_seq, contact_mask=None):
     seq_starts = [None, None]
     pwm_starts = [None,None]
     ks = [None, None]
     scores = [None, None]
 
-    pwm_starts[0], seq_starts[0], ks[0], scores[0] = alignPWMSeq(pwm, dna_seq[0,:,:])
-    pwm_starts[1], seq_starts[1], ks[1], scores[1] = alignPWMSeq(pwm, dna_seq[1,:,:])
+    if contact_mask is None:
+        contact_masks = [None, None]
+    else:
+        contact_mask = np.asarray(contact_mask).astype(bool)
+        if contact_mask.shape[0] != dna_seq.shape[1]:
+            raise ValueError("contact_mask length must match DNA sequence length")
+        contact_masks = [contact_mask, np.flip(contact_mask)]
+
+    pwm_starts[0], seq_starts[0], ks[0], scores[0] = alignPWMSeq(pwm, dna_seq[0,:,:], contact_masks[0])
+    pwm_starts[1], seq_starts[1], ks[1], scores[1] = alignPWMSeq(pwm, dna_seq[1,:,:], contact_masks[1])
 
     pwm_mask = [None, None] #aligned region of PWM
     dna_mask = [None, None] #aligned refion on DNA
@@ -30,4 +38,3 @@ def computeYAndMask(pwm, dna_seq):
     dna_mask[1-primary_index] = np.flip(dna_mask[primary_index])
 
     return Y_pwm, pwm_mask, dna_mask, scores[primary_index]/ks[primary_index]
-

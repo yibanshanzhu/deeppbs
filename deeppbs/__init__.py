@@ -35,7 +35,7 @@ from .make_logo import makeLogo
 from .kmer_utils import countKmers, rc, getLabelDict, getRcSeparatedLabelDict
 from .align_seqs import alignSeqs
 from .sample_from_pwm import sampleFromPwm
-from .count_contacts import countContacts
+from .count_contacts import countContacts, computeContactMask
 ##Mesh
 from .mesh import Mesh
 ##inner modules
@@ -85,5 +85,6 @@ __all__ = [
     "getRcSeparatedLabelDict",
     "alignSeqs",
     "sampleFromPwm",
-    "countContacts"
+    "countContacts",
+    "computeContactMask"
 ]

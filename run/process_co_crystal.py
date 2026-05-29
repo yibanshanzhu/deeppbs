@@ -28,7 +28,7 @@ backbone_parameters = ["major_groove_3dna", "minor_groove_3dna"]
 # deeppbs modules
 from deeppbs import StructureData, splitEntities, cleanProtein, processDNA, cleanDNA
 from deeppbs import makeDNACG, makeProteinGraph, loadPWM, alignPWMSeq, computeYAndMask
-from deeppbs import getAtomSASA, getAtomDepth, getAchtleyFactors, getCV, countContacts
+from deeppbs import getAtomSASA, getAtomDepth, getAchtleyFactors, getCV, countContacts, computeContactMask
 
 C = json.load(open(ARGS.config_file,"r")) 
 outdir = C.get("FEATURE_DATA_PATH", "./output")
@@ -87,8 +87,14 @@ for line in [l.strip() for l in open(ARGS.data_file,"r").readlines()]:
             print("ERROR: missing C5/OP1/OP1/OP2")
             continue
 
+        contact_mask, contact_counts = computeContactMask(protein, pdb_file, V_dna)
+
         if not ARGS.no_pwm:
-            Y_pwm, pwm_mask, dna_mask, aln_score = computeYAndMask(pwm, dna_seq)
+            try:
+                Y_pwm, pwm_mask, dna_mask, aln_score = computeYAndMask(pwm, dna_seq, contact_mask)
+            except ValueError as e:
+                print("ERROR: contact-aware alignment error", pdb_file, e)
+                continue
         else:
             Y_pwm = dna_seq
             pwm_mask = [True]*dna_seq.shape[0]
@@ -173,8 +179,8 @@ for line in [l.strip() for l in open(ARGS.data_file,"r").readlines()]:
         print("CONTACT COUNT", contacts[0], pdb_file)
 
         if not ARGS.no_pwm:
-            np.savez_compressed(os.path.join(outdir,"{}_{}.npz".format(pdb_file.split("/")[-1].replace(".pdb","").replace(".cif",""), pwm_id)), V_dna=V_dna, X_dna=X_dna, X_dna_point=X_dna_point, dna_feature_names=dna_feature_names, V_prot=V_prot, X_prot=X_prot, E_prot=E_prot, prot_feature_names=pro_features, Y_hard=dna_seq,Y_pwm=Y_pwm, pwm_mask=pwm_mask, dna_mask=dna_mask, aln_score=np.array([aln_score]), dna_vectors=dna_vectors, prot_vectors=prot_vectors, contacts=contacts)
+            np.savez_compressed(os.path.join(outdir,"{}_{}.npz".format(pdb_file.split("/")[-1].replace(".pdb","").replace(".cif",""), pwm_id)), V_dna=V_dna, X_dna=X_dna, X_dna_point=X_dna_point, dna_feature_names=dna_feature_names, V_prot=V_prot, X_prot=X_prot, E_prot=E_prot, prot_feature_names=pro_features, Y_hard=dna_seq,Y_pwm=Y_pwm, pwm_mask=pwm_mask, dna_mask=dna_mask, aln_score=np.array([aln_score]), dna_vectors=dna_vectors, prot_vectors=prot_vectors, contacts=contacts, contact_mask=contact_mask, contact_counts=contact_counts)
         else:
-            np.savez_compressed(os.path.join(outdir,"{}.npz".format(pdb_file.split("/")[-1].replace(".pdb","").replace(".cif",""))), V_dna=V_dna, X_dna=X_dna, X_dna_point=X_dna_point, dna_feature_names=dna_feature_names, V_prot=V_prot, X_prot=X_prot, E_prot=E_prot, prot_feature_names=pro_features, Y_hard=dna_seq,Y_pwm=Y_pwm, pwm_mask=pwm_mask, dna_mask=dna_mask, aln_score=np.array([aln_score]), dna_vectors=dna_vectors, prot_vectors=prot_vectors, contacts=contacts)
+            np.savez_compressed(os.path.join(outdir,"{}.npz".format(pdb_file.split("/")[-1].replace(".pdb","").replace(".cif",""))), V_dna=V_dna, X_dna=X_dna, X_dna_point=X_dna_point, dna_feature_names=dna_feature_names, V_prot=V_prot, X_prot=X_prot, E_prot=E_prot, prot_feature_names=pro_features, Y_hard=dna_seq,Y_pwm=Y_pwm, pwm_mask=pwm_mask, dna_mask=dna_mask, aln_score=np.array([aln_score]), dna_vectors=dna_vectors, prot_vectors=prot_vectors, contacts=contacts, contact_mask=contact_mask, contact_counts=contact_counts)
     except:
         continue
