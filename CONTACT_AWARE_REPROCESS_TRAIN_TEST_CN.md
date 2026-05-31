@@ -356,6 +356,20 @@ grep -E "ERROR|CONTACT COUNT" "$EXP_ROOT/process_contact_aware.log" | tail -50
 find "$NPZ_DIR" -name "*.npz" | wc -l
 ```
 
+当前实验记录：
+
+| 项 | 结果 |
+|---|---|
+| 新 `.npz` 数量 | `439` |
+| 正常日志 | 大量 `CONTACT COUNT` |
+| 主要跳过原因 | `ERROR: helix count problem 2` |
+
+解释：
+
+```text
+helix count problem 2 表示该结构检测到不止一个 DNA helix，被 DeepPBS 原始处理逻辑跳过。
+```
+
 ## 7. 生成可用 folds
 
 优先复用原始 folds，保证和 baseline 可比。但 contact-aware alignment 可能跳过部分样本，所以要过滤掉新目录里不存在的 `.npz`。
@@ -386,7 +400,42 @@ PY
 
 如果 missing 很多，需要先看处理日志，确认是不是 PDB 路径、PWM id 或 contact 过严导致。
 
-## 8. 写训练配置
+当前实验 fold 过滤结果：
+
+| fold | train kept | train missing | valid kept | valid missing |
+|---|---:|---:|---:|---:|
+| 0 | 276 | 143 | 65 | 39 |
+| 1 | 270 | 149 | 71 | 33 |
+| 2 | 269 | 150 | 72 | 32 |
+| 3 | 276 | 143 | 65 | 39 |
+| 4 | 276 | 143 | 65 | 39 |
+
+## 8. 检查 label-contact overlap
+
+训练前必须确认每个新 label 的 aligned region 都与 contact mask 有交集：
+
+```bash
+python - <<'PY'
+import glob
+import os
+import numpy as np
+
+bad = []
+for f in glob.glob(os.environ["NPZ_DIR"] + "/*.npz"):
+    z = np.load(f, allow_pickle=True)
+    overlap = (z["contact_mask"].astype(bool) & z["dna_mask"][0].astype(bool)).sum()
+    if overlap == 0:
+        bad.append(os.path.basename(f))
+
+print("bad_overlap_count", len(bad))
+print(bad[:20])
+assert not bad
+PY
+```
+
+如果 `bad_overlap_count` 不是 0，先不要训练。
+
+## 9. 写训练配置
 
 从原配置复制，只改 `data_dir` 和 `output_path`：
 
@@ -408,7 +457,7 @@ cp config.json config_contact_aware.json
 grep -E '"data_dir"|"output_path"|"epochs"|"batch_size"|"condition"' config_contact_aware.json
 ```
 
-## 9. 先训练 fold0
+## 10. 先训练 fold0
 
 先跑单折验证数据和训练流程：
 
@@ -429,7 +478,7 @@ ls -lh "$OUT_DIR/contact_aware_fold0"
 tail -80 "$OUT_DIR/contact_aware_fold0/run.log"
 ```
 
-## 10. 训练 5-fold
+## 11. 训练 5-fold
 
 单折没问题后跑 5 折。
 
@@ -452,9 +501,9 @@ wait
 
 如果用集群调度，按服务器资源管理方式把上面每个 fold 拆成一个 job。
 
-## 11. 基本测试和质控
+## 12. 基本测试和质控
 
-### 11.1 label contact overlap
+### 12.1 label contact overlap
 
 确认训练数据中所有 aligned region 都有 contact overlap：
 
@@ -478,7 +527,7 @@ assert not bad
 PY
 ```
 
-### 11.2 训练输出完整性
+### 12.2 训练输出完整性
 
 ```bash
 for i in 0 1 2 3 4
@@ -488,7 +537,7 @@ do
 done
 ```
 
-### 11.3 汇总 metrics
+### 12.3 汇总 metrics
 
 ```bash
 python - <<'PY'
@@ -533,7 +582,7 @@ PY
 grep -E "validation|mae|IC|auroc|best" "$OUT_DIR"/contact_aware_fold*/run.log | tail -100
 ```
 
-## 12. 和 baseline 对比
+## 13. 和 baseline 对比
 
 至少比较这些：
 
@@ -596,7 +645,7 @@ PY
 | validation 变好 | 支持新 alignment 策略 |
 | validation 变差 | 需要进一步看跳过样本数量、contact 定义和 label 长度分布 |
 
-## 13. 最小结论标准
+## 14. 最小结论标准
 
 只有同时满足下面条件，才算这轮实验有效：
 
