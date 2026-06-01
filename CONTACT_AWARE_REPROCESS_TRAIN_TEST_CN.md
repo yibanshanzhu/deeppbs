@@ -517,31 +517,24 @@ tail -80 "$OUT_DIR/contact_aware_fold0_single_gpu/run.log"
 
 单折没问题后跑 5 折。
 
-不要把 5 个 fold 全部丢到同一张 GPU。node5 有 2 张 GPU 时，建议每次并行 2 个 fold：
+继续保留 `--single_gpu`，避免 PyG `DataParallel` 报错。fold0 已经跑完时，可以直接并发跑剩余 fold1-fold4：
 
 ```bash
 cd ~/DeepPBS/run
 
-CUDA_VISIBLE_DEVICES=0 nohup python -W ignore driver.py "$FOLD_DIR/train1.txt" "$FOLD_DIR/valid1.txt" \
-  -c config_contact_aware.json \
-  --balance unmasked \
-  --eval_every 1 \
-  --single_gpu \
-  --run_name contact_aware_fold1_single_gpu \
-  > "$OUT_DIR/contact_aware_fold1_single_gpu.nohup.log" 2>&1 &
-
-CUDA_VISIBLE_DEVICES=1 nohup python -W ignore driver.py "$FOLD_DIR/train2.txt" "$FOLD_DIR/valid2.txt" \
-  -c config_contact_aware.json \
-  --balance unmasked \
-  --eval_every 1 \
-  --single_gpu \
-  --run_name contact_aware_fold2_single_gpu \
-  > "$OUT_DIR/contact_aware_fold2_single_gpu.nohup.log" 2>&1 &
+for i in 1 2 3 4
+do
+  nohup python -W ignore driver.py "$FOLD_DIR/train${i}.txt" "$FOLD_DIR/valid${i}.txt" \
+    -c config_contact_aware.json \
+    --balance unmasked \
+    --eval_every 1 \
+    --single_gpu \
+    --run_name contact_aware_fold${i}_single_gpu \
+    > "$OUT_DIR/contact_aware_fold${i}_single_gpu.nohup.log" 2>&1 &
+done
 ```
 
-等 fold1/fold2 结束后，再同样方式跑 fold3/fold4。
-
-如果用集群调度，按服务器资源管理方式把上面每个 fold 拆成一个 job。
+如果需要从头重跑 5 折，把循环改成 `for i in 0 1 2 3 4`。
 
 ## 12. 基本测试和质控
 
@@ -574,54 +567,85 @@ PY
 ```bash
 for i in 0 1 2 3 4
 do
-  test -f "$OUT_DIR/contact_aware_fold${i}/Model.best.tar" && echo "fold$i best ok"
-  test -f "$OUT_DIR/contact_aware_fold${i}/Model_metrics.json" && echo "fold$i metrics ok"
+  d="$OUT_DIR/contact_aware_fold${i}_single_gpu"
+  echo "===== fold$i ====="
+  grep -q "Training Successfully Ended" "$d/run.log" && echo "train ok" || echo "train failed"
+  grep -E "Writing best state|Best tracked metric" "$d/run.log" | tail -2
+  test -f "$d/Model.best.tar" && echo "best model ok"
+  test -f "$d/Model_metrics.json" && echo "metrics ok"
+  test -f "$d/validation_set_predictions.npz" && echo "valid pred ok"
 done
 ```
+
+当前 5-fold 完整性检查结果：
+
+| fold | 状态 | best epoch | best tracked metric |
+|---|---|---:|---:|
+| 0 | `train ok` | 46 | 0.715 |
+| 1 | `train ok` | 12 | 0.665 |
+| 2 | `train ok` | 50 | 0.659 |
+| 3 | `train ok` | 47 | 0.671 |
+| 4 | `train ok` | 37 | 0.637 |
 
 ### 12.3 汇总 metrics
 
 ```bash
 python - <<'PY'
-import glob
-import json
-import os
+import glob, json, os
 from statistics import mean
 
-out_dir = os.environ["OUT_DIR"]
 rows = []
-for f in sorted(glob.glob(out_dir + "/contact_aware_fold*/Model_metrics.json")):
-    with open(f) as fh:
-        m = json.load(fh)
+for f in sorted(glob.glob(os.environ["OUT_DIR"] + "/contact_aware_fold*_single_gpu/Model_metrics.json")):
+    m = json.load(open(f))
+    epochs = m["epochs"]
+    best_epoch = m.get("best_epoch", epochs[-1])
+    idx = epochs.index(best_epoch) if best_epoch in epochs else -1
+    val = m["validation"]
 
-    best_epoch = m.get("best_epoch")
-    if best_epoch is None:
-        idx = -1
-    else:
-        idx = m["epochs"].index(best_epoch)
+    def get(k):
+        xs = val.get(k)
+        return xs[idx] if xs else None
 
-    validation = m["validation"]
     row = {
         "run": os.path.basename(os.path.dirname(f)),
         "best_epoch": best_epoch,
-        "mae": validation["mae"][idx],
-        "ic_weighted_pcc": validation["ic_weighted_pcc"][idx],
-        "auroc": validation["auroc"][idx],
-        "loss": validation["loss"][idx],
+        "auroc": get("auroc"),
+        "mae": get("mae"),
+        "ic_weighted_pcc": get("ic_weighted_pcc"),
+        "pearsonr": get("pearsonr"),
+        "spearmanr": get("spearmanr"),
+        "loss": get("loss"),
     }
     rows.append(row)
-    print(row)
 
-for key in ["mae", "ic_weighted_pcc", "auroc", "loss"]:
-    vals = [r[key] for r in rows]
-    print("mean", key, mean(vals))
+cols = ["run", "best_epoch", "auroc", "mae", "ic_weighted_pcc", "pearsonr", "spearmanr", "loss"]
+print("\t".join(cols))
+for r in rows:
+    print("\t".join("" if r[c] is None else str(round(r[c], 4)) if isinstance(r[c], float) else str(r[c]) for c in cols))
+
+print("\nMEAN")
+for k in cols[2:]:
+    vals = [r[k] for r in rows if isinstance(r[k], (int, float))]
+    if vals:
+        print(k, round(mean(vals), 4))
 PY
 ```
+
+当前 contact-aware 5-fold validation 结果：
+
+| fold | best epoch | auroc | mae | ic_weighted_pcc | pearsonr | spearmanr | loss |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 46 | 0.8259 | 0.7149 | 0.4321 | 0.5308 | 0.4100 | 0.7149 |
+| 1 | 12 | 0.8344 | 0.6653 | 0.4577 | 0.5539 | 0.4234 | 0.6653 |
+| 2 | 50 | 0.8587 | 0.6589 | 0.4649 | 0.5748 | 0.4417 | 0.6589 |
+| 3 | 47 | 0.8368 | 0.6709 | 0.4729 | 0.5832 | 0.4658 | 0.6709 |
+| 4 | 37 | 0.8581 | 0.6365 | 0.4720 | 0.6067 | 0.4719 | 0.6365 |
+| mean | - | 0.8428 | 0.6693 | 0.4599 | 0.5699 | 0.4426 | 0.6693 |
 
 如果 metrics JSON 结构和预期不同，直接看每个 fold 的 `run.log`：
 
 ```bash
-grep -E "validation|mae|IC|auroc|best" "$OUT_DIR"/contact_aware_fold*/run.log | tail -100
+grep -E "validation|mae|IC|auroc|best" "$OUT_DIR"/contact_aware_fold*_single_gpu/run.log | tail -100
 ```
 
 ## 13. 和 baseline 对比
