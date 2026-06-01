@@ -459,23 +459,47 @@ grep -E '"data_dir"|"output_path"|"epochs"|"batch_size"|"condition"' config_cont
 
 ## 10. 先训练 fold0
 
-先跑单折验证数据和训练流程：
+先跑单折验证数据和训练流程。
+
+重要经验：
+
+| 经验 | 原因 |
+|---|---|
+| 加 `--single_gpu` | PyG `DataParallel` 在 2 GPU 下可能报 `RuntimeError: Could not infer dtype of NoneType` |
+| 用 `nohup` 写日志 | 训练时间长，断开 shell 不影响进程 |
+
+不要直接用默认多 GPU。当前可用命令：
 
 ```bash
 cd ~/DeepPBS/run
 
-python -W ignore driver.py "$FOLD_DIR/train0.txt" "$FOLD_DIR/valid0.txt" \
+nohup python -W ignore driver.py "$FOLD_DIR/train0.txt" "$FOLD_DIR/valid0.txt" \
   -c config_contact_aware.json \
   --balance unmasked \
   --eval_every 1 \
-  --run_name contact_aware_fold0
+  --single_gpu \
+  --run_name contact_aware_fold0_single_gpu \
+  > "$OUT_DIR/contact_aware_fold0_single_gpu.nohup.log" 2>&1 &
 ```
 
-检查输出：
+检查启动日志：
 
 ```bash
-ls -lh "$OUT_DIR/contact_aware_fold0"
-tail -80 "$OUT_DIR/contact_aware_fold0/run.log"
+tail -f "$OUT_DIR/contact_aware_fold0_single_gpu.nohup.log"
+```
+
+期望看到：
+
+```text
+INFO:    Running model on device cuda:0.
+INFO:    Beginning Training (50 epochs)
+```
+
+检查完成输出：
+
+```bash
+ls -lh "$OUT_DIR/contact_aware_fold0_single_gpu"
+tail -80 "$OUT_DIR/contact_aware_fold0_single_gpu/run.log"
 ```
 
 ## 11. 训练 5-fold
@@ -489,12 +513,13 @@ cd ~/DeepPBS/run
 
 for i in 0 1 2 3 4
 do
-  python -W ignore driver.py "$FOLD_DIR/train${i}.txt" "$FOLD_DIR/valid${i}.txt" \
+  nohup python -W ignore driver.py "$FOLD_DIR/train${i}.txt" "$FOLD_DIR/valid${i}.txt" \
     -c config_contact_aware.json \
     --balance unmasked \
     --eval_every 1 \
-    --run_name contact_aware_fold${i} \
-    > "$OUT_DIR/contact_aware_fold${i}.stdout" 2>&1 &
+    --single_gpu \
+    --run_name contact_aware_fold${i}_single_gpu \
+    > "$OUT_DIR/contact_aware_fold${i}_single_gpu.nohup.log" 2>&1 &
 done
 wait
 ```
