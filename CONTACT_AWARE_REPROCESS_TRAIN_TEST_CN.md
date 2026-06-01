@@ -650,7 +650,150 @@ grep -E "validation|mae|IC|auroc|best" "$OUT_DIR"/contact_aware_fold*_single_gpu
 
 ## 13. 和 baseline 对比
 
-至少比较这些：
+下一步必须先做严格 internal baseline，再考虑外部 benchmark。
+
+严格 baseline 的定义：
+
+| 变量 | baseline_filtered | contact-aware |
+|---|---|---|
+| fold 列表 | `$FOLD_DIR/train*.txt` / `$FOLD_DIR/valid*.txt` | 同左 |
+| 训练配置 | 同一套超参数 | 同左 |
+| 模型代码 | 同一份代码 | 同左 |
+| `.npz` 数据目录 | 原 DeepPBS `assembly2024` | 新 `$NPZ_DIR` |
+| 唯一差异 | 原 PWM-only alignment label | contact-aware alignment label |
+
+这个对照回答的是：只改变 alignment 策略，结果是否变好。
+
+### 13.1 训练 baseline_filtered
+
+先建 baseline 配置：
+
+```bash
+cd ~/DeepPBS/run
+
+cp config_contact_aware.json config_baseline_filtered.json
+
+python - <<'PY'
+import json
+from pathlib import Path
+
+p = Path("config_baseline_filtered.json")
+c = json.loads(p.read_text())
+c["data_dir"] = "/home/dangqi/deeppbs_repro/deeppbs_data/deeppbsmar24/data/assembly2024"
+c["output_path"] = "/home/dangqi/deeppbs_contact_aware_exp/output"
+p.write_text(json.dumps(c, indent=2) + "\n")
+PY
+```
+
+确认配置：
+
+```bash
+grep -E '"data_dir"|"output_path"|"best_state_metric"|"best_state_metric_goal"' config_baseline_filtered.json
+```
+
+跑同一批 filtered folds：
+
+```bash
+for i in 0 1 2 3 4
+do
+  nohup python -W ignore driver.py "$FOLD_DIR/train${i}.txt" "$FOLD_DIR/valid${i}.txt" \
+    -c config_baseline_filtered.json \
+    --balance unmasked \
+    --eval_every 1 \
+    --single_gpu \
+    --run_name baseline_filtered_fold${i}_single_gpu \
+    > "$OUT_DIR/baseline_filtered_fold${i}_single_gpu.nohup.log" 2>&1 &
+done
+```
+
+检查进度：
+
+```bash
+jobs
+tail -f "$OUT_DIR/baseline_filtered_fold0_single_gpu.nohup.log"
+```
+
+### 13.2 检查 baseline_filtered 输出
+
+```bash
+for i in 0 1 2 3 4
+do
+  d="$OUT_DIR/baseline_filtered_fold${i}_single_gpu"
+  echo "===== baseline fold$i ====="
+  grep -q "Training Successfully Ended" "$d/run.log" && echo "train ok" || echo "train failed"
+  grep -E "Writing best state|Best tracked metric" "$d/run.log" | tail -2
+  test -f "$d/Model.best.tar" && echo "best model ok"
+  test -f "$d/Model_metrics.json" && echo "metrics ok"
+  test -f "$d/validation_set_predictions.npz" && echo "valid pred ok"
+done
+```
+
+### 13.3 汇总 baseline vs contact-aware
+
+```bash
+python - <<'PY'
+import glob, json, os
+from statistics import mean
+
+out_dir = os.environ["OUT_DIR"]
+
+def collect(pattern, label):
+    rows = []
+    for f in sorted(glob.glob(os.path.join(out_dir, pattern, "Model_metrics.json"))):
+        m = json.load(open(f))
+        epochs = m["epochs"]
+        best_epoch = m.get("best_epoch", epochs[-1])
+        idx = epochs.index(best_epoch) if best_epoch in epochs else -1
+        val = m["validation"]
+
+        def get(k):
+            xs = val.get(k)
+            return xs[idx] if xs else None
+
+        rows.append({
+            "group": label,
+            "run": os.path.basename(os.path.dirname(f)),
+            "best_epoch": best_epoch,
+            "auroc": get("auroc"),
+            "mae": get("mae"),
+            "ic_weighted_pcc": get("ic_weighted_pcc"),
+            "pearsonr": get("pearsonr"),
+            "spearmanr": get("spearmanr"),
+            "loss": get("loss"),
+        })
+    return rows
+
+rows = []
+rows += collect("baseline_filtered_fold*_single_gpu", "baseline_filtered")
+rows += collect("contact_aware_fold*_single_gpu", "contact_aware")
+
+cols = ["group", "run", "best_epoch", "auroc", "mae", "ic_weighted_pcc", "pearsonr", "spearmanr", "loss"]
+print("\t".join(cols))
+for r in rows:
+    print("\t".join("" if r[c] is None else str(round(r[c], 4)) if isinstance(r[c], float) else str(r[c]) for c in cols))
+
+print("\nMEAN")
+for group in ["baseline_filtered", "contact_aware"]:
+    sub = [r for r in rows if r["group"] == group]
+    print(group)
+    for k in cols[3:]:
+        vals = [r[k] for r in sub if isinstance(r[k], (int, float))]
+        if vals:
+            print(" ", k, round(mean(vals), 4))
+PY
+```
+
+判定逻辑：
+
+| 结果 | 结论 |
+|---|---|
+| contact-aware 明显优于 baseline_filtered | alignment 策略有正向信号，可以继续跑外部 benchmark |
+| 两者接近 | 需要看 benchmark，不能只靠 internal 指标判断 |
+| contact-aware 明显差于 baseline_filtered | 当前 hard contact-aware alignment 基本判负，先不要扩展实验 |
+
+### 13.4 `.npz` 级别对比
+
+训练指标之外，至少比较这些：
 
 | 对比项 | baseline | contact-aware |
 |---|---|---|
@@ -660,7 +803,7 @@ grep -E "validation|mae|IC|auroc|best" "$OUT_DIR"/contact_aware_fold*_single_gpu
 | validation MAE | 原训练输出 | 新训练输出 |
 | validation PCC/IC 指标 | 原训练输出 | 新训练输出 |
 
-先做 `.npz` 级别对比：
+`.npz` 级别对比命令：
 
 ```bash
 export BASELINE_NPZ_DIR=$ORIG_DEEPPBS_DATA/data/assembly2024
