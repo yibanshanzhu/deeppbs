@@ -502,27 +502,44 @@ ls -lh "$OUT_DIR/contact_aware_fold0_single_gpu"
 tail -80 "$OUT_DIR/contact_aware_fold0_single_gpu/run.log"
 ```
 
+当前 fold0 结果：
+
+| 项 | 结果 |
+|---|---|
+| 训练状态 | `Training Successfully Ended` |
+| best epoch | `46` |
+| best tracked metric | `0.715` |
+| 模型文件 | `Model.best.tar` 已生成 |
+| metrics 文件 | `Model_metrics.json` 已生成 |
+| 验证预测 | `validation_set_predictions.npz` 已生成 |
+
 ## 11. 训练 5-fold
 
 单折没问题后跑 5 折。
 
-如果直接后台跑：
+不要把 5 个 fold 全部丢到同一张 GPU。node5 有 2 张 GPU 时，建议每次并行 2 个 fold：
 
 ```bash
 cd ~/DeepPBS/run
 
-for i in 0 1 2 3 4
-do
-  nohup python -W ignore driver.py "$FOLD_DIR/train${i}.txt" "$FOLD_DIR/valid${i}.txt" \
-    -c config_contact_aware.json \
-    --balance unmasked \
-    --eval_every 1 \
-    --single_gpu \
-    --run_name contact_aware_fold${i}_single_gpu \
-    > "$OUT_DIR/contact_aware_fold${i}_single_gpu.nohup.log" 2>&1 &
-done
-wait
+CUDA_VISIBLE_DEVICES=0 nohup python -W ignore driver.py "$FOLD_DIR/train1.txt" "$FOLD_DIR/valid1.txt" \
+  -c config_contact_aware.json \
+  --balance unmasked \
+  --eval_every 1 \
+  --single_gpu \
+  --run_name contact_aware_fold1_single_gpu \
+  > "$OUT_DIR/contact_aware_fold1_single_gpu.nohup.log" 2>&1 &
+
+CUDA_VISIBLE_DEVICES=1 nohup python -W ignore driver.py "$FOLD_DIR/train2.txt" "$FOLD_DIR/valid2.txt" \
+  -c config_contact_aware.json \
+  --balance unmasked \
+  --eval_every 1 \
+  --single_gpu \
+  --run_name contact_aware_fold2_single_gpu \
+  > "$OUT_DIR/contact_aware_fold2_single_gpu.nohup.log" 2>&1 &
 ```
+
+等 fold1/fold2 结束后，再同样方式跑 fold3/fold4。
 
 如果用集群调度，按服务器资源管理方式把上面每个 fold 拆成一个 job。
 
