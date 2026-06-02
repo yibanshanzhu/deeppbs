@@ -1081,6 +1081,29 @@ print("tie_count", int((deltas == 0).sum()))
 PY
 ```
 
+当前 independent benchmark 结果：
+
+| 指标 | baseline_filtered | contact-aware | 变化 |
+|---|---:|---:|---:|
+| n | 130 | 130 | 0 |
+| bad | 0 | 0 | 0 |
+| mean MAE | 0.5896 | 0.5870 | -0.0026 |
+| median MAE | 0.5498 | 0.5652 | +0.0154 |
+| lower quartile | 0.4462 | 0.4405 | -0.0057 |
+| upper quartile | 0.7254 | 0.7363 | +0.0109 |
+| paired mean delta | - | - | -0.0026 |
+| paired median delta | - | - | +0.0082 |
+| contact-aware better count | - | 61 / 130 | - |
+
+解释：
+
+| 观察 | 说明 |
+|---|---|
+| mean MAE 小幅降低 | contact-aware 在少数样本上可能有较大改善 |
+| median MAE 升高 | 典型样本没有稳定改善 |
+| contact-aware better count 为 61/130 | 少于一半样本变好 |
+| n=130, bad=0 | 两组 benchmark 覆盖一致，不是样本缺失造成的差异 |
+
 ### 14.5 benchmark 判定
 
 | benchmark 结果 | 解释 |
@@ -1089,7 +1112,16 @@ PY
 | mean/median 接近，但 paired better count 接近 50/50 | 外部收益弱，hard contact-aware 只能算中性 |
 | contact-aware 更差 | internal gain 没泛化到 independent benchmark，需要回看 alignment 定义 |
 
-如果 contact-aware 在 official `id.txt` target 下也赢，这是比较强的信号，因为这个 benchmark target 仍是 DeepPBS 官方旧 alignment 口径。
+当前判定：
+
+| 层面 | 结论 |
+|---|---|
+| internal 5-fold | contact-aware 小幅优于 strict baseline |
+| independent benchmark mean | contact-aware 极小幅优于 |
+| independent benchmark median/count | 不支持稳定优于 |
+| 总体 | hard contact-aware alignment 是弱正向/中性信号，不是明确提升 |
+
+这说明 contact-aware 方向可能有道理，但当前 hard filter 策略太粗。下一版应考虑 soft contact-aware score，而不是只要求 `contact_overlap > 0`。
 
 ## 15. 最小结论标准
 
