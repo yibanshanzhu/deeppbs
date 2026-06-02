@@ -783,6 +783,28 @@ for group in ["baseline_filtered", "contact_aware"]:
 PY
 ```
 
+当前严格 baseline 对照结果：
+
+| 指标 | baseline_filtered mean | contact-aware mean | 变化 |
+|---|---:|---:|---:|
+| auroc | 0.8343 | 0.8428 | +0.0085 |
+| mae | 0.6887 | 0.6693 | -0.0194 |
+| ic_weighted_pcc | 0.4588 | 0.4599 | +0.0011 |
+| pearsonr | 0.5558 | 0.5699 | +0.0141 |
+| spearmanr | 0.4330 | 0.4426 | +0.0096 |
+| loss | 0.6887 | 0.6693 | -0.0194 |
+
+当前结论：
+
+| 判断 | 结论 |
+|---|---|
+| contact-aware 是否训练失败 | 否 |
+| contact-aware 是否优于严格 baseline | 是，小幅优于 |
+| IC weighted PCC 是否明显提升 | 否，基本持平 |
+| 是否值得继续跑外部 benchmark | 是 |
+
+这轮只能说明 hard contact-aware alignment 有正向信号，不能过度解释为大幅提升。
+
 判定逻辑：
 
 | 结果 | 结论 |
