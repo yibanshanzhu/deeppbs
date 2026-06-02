@@ -730,6 +730,8 @@ done
 
 ### 13.3 汇总 baseline vs contact-aware
 
+下面就是刚刚使用的严格对比代码：读取两个实验组的 5 个 `Model_metrics.json`，按每个 fold 的 `best_epoch` 取 validation 指标，再计算 5-fold mean。
+
 ```bash
 python - <<'PY'
 import glob, json, os
@@ -876,7 +878,220 @@ PY
 | validation 变好 | 支持新 alignment 策略 |
 | validation 变差 | 需要进一步看跳过样本数量、contact 定义和 label 长度分布 |
 
-## 14. 最小结论标准
+## 14. 跑 independent benchmark
+
+internal 5-fold 只说明训练集分布内有小幅正向信号。下一步要跑 DeepPBS independent benchmark，看这个 gain 能不能转成外部任务收益。
+
+benchmark 设置：
+
+| 项 | 设置 |
+|---|---|
+| benchmark 列表 | `run/folds/id.txt` |
+| benchmark 样本数 | DeepPBS independent benchmark，原始 130 条 |
+| benchmark 输入 `.npz` | 原 DeepPBS `assembly2024` |
+| 对比模型 | `baseline_filtered` 5-fold ensemble vs `contact_aware` 5-fold ensemble |
+| 主要指标 | PWM MAE，使用 DeepPBS Fig.3g 近似口径 |
+| 判定 | 在同一批 benchmark target 上比较两个 ensemble |
+
+注意：本分支的 `run/predict.py` 支持在 config 里写 `checkpoint_dirs`，可以直接指定这次训练出的模型目录，不需要覆盖官方 `plot_scripts/txts/DeepPBS.txt`。
+
+### 14.1 准备 benchmark 环境
+
+```bash
+cd ~/DeepPBS
+
+export EXP_ROOT=$HOME/deeppbs_contact_aware_exp
+export OUT_DIR=$EXP_ROOT/output
+export BENCH_DIR=$EXP_ROOT/benchmark_id
+export ORIG_DEEPPBS_DATA=$HOME/deeppbs_repro/deeppbs_data/deeppbsmar24
+export BENCH_DATA_DIR=$ORIG_DEEPPBS_DATA/data/assembly2024
+export BENCH_LIST=$PWD/run/folds/id.txt
+
+test -f "$BENCH_LIST" && echo "BENCH_LIST ok"
+test -d "$BENCH_DATA_DIR" && echo "BENCH_DATA_DIR ok"
+wc -l "$BENCH_LIST"
+mkdir -p "$BENCH_DIR"
+```
+
+### 14.2 生成两个 benchmark config
+
+```bash
+cd ~/DeepPBS/run
+
+python - <<'PY'
+import json
+import os
+from pathlib import Path
+
+out_dir = Path(os.environ["OUT_DIR"])
+bench_data_dir = os.environ["BENCH_DATA_DIR"]
+
+groups = {
+    "baseline_filtered": "baseline_filtered_fold{idx}_single_gpu",
+    "contact_aware": "contact_aware_fold{idx}_single_gpu",
+}
+
+for group, pattern in groups.items():
+    c = json.loads(Path("process/pred_configs/pred_config_deeppbs.json").read_text())
+    c["data_dir"] = bench_data_dir
+    c["condition"] = "prot_shape"
+    c["readout"] = "all"
+    c["checkpoint_dirs"] = [
+        str(out_dir / pattern.format(idx=i))
+        for i in range(5)
+    ]
+    p = Path(f"config_benchmark_{group}.json")
+    p.write_text(json.dumps(c, indent=2) + "\n")
+    print(p)
+    print("\n".join(c["checkpoint_dirs"]))
+PY
+```
+
+确认每个 checkpoint 和 scaler 都存在：
+
+```bash
+python - <<'PY'
+import json
+from pathlib import Path
+
+for cfg in ["config_benchmark_baseline_filtered.json", "config_benchmark_contact_aware.json"]:
+    c = json.loads(Path(cfg).read_text())
+    print("====", cfg, "====")
+    for d in c["checkpoint_dirs"]:
+        d = Path(d)
+        print(d.name, (d / "Model.best.tar").exists(), (d / "scaler.pkl").exists())
+PY
+```
+
+### 14.3 跑 benchmark 预测
+
+```bash
+cd ~/DeepPBS/run
+
+python -W ignore predict.py \
+  "$BENCH_LIST" \
+  "$BENCH_DIR/baseline_filtered" \
+  -c config_benchmark_baseline_filtered.json \
+  > "$BENCH_DIR/baseline_filtered.predict.log" 2>&1
+
+python -W ignore predict.py \
+  "$BENCH_LIST" \
+  "$BENCH_DIR/contact_aware" \
+  -c config_benchmark_contact_aware.json \
+  > "$BENCH_DIR/contact_aware.predict.log" 2>&1
+```
+
+检查预测数量：
+
+```bash
+grep -E "Traceback|ERROR|FileNotFoundError" "$BENCH_DIR"/*.predict.log
+find "$BENCH_DIR/baseline_filtered/npzs" -name "*_predict.npz" | wc -l
+find "$BENCH_DIR/contact_aware/npzs" -name "*_predict.npz" | wc -l
+```
+
+两个数量都应该接近或等于 `wc -l "$BENCH_LIST"`。
+
+### 14.4 统计 benchmark 指标
+
+这段代码用同一个 `id.txt` target，分别评估两个 ensemble 的预测，并做 paired delta。`mae_delta = contact_aware - baseline_filtered`，所以负数表示 contact-aware 更好。
+
+```bash
+cd ~/DeepPBS/run
+
+python - <<'PY'
+import os
+import numpy as np
+from pathlib import Path
+from statistics import mean
+
+bench_list = Path(os.environ["BENCH_LIST"])
+data_dir = Path(os.environ["BENCH_DATA_DIR"])
+bench_dir = Path(os.environ["BENCH_DIR"])
+
+groups = {
+    "baseline_filtered": bench_dir / "baseline_filtered" / "npzs",
+    "contact_aware": bench_dir / "contact_aware" / "npzs",
+}
+
+def make_mask(mask, n):
+    mask = np.asarray(mask)
+    if mask.ndim == 0:
+        return np.full(n, bool(mask))
+    return mask.astype(bool).reshape(-1)
+
+def eval_group(pred_dir):
+    rows = {}
+    bad = []
+    for name in bench_list.read_text().splitlines():
+        name = name.strip()
+        if not name:
+            continue
+
+        target_path = data_dir / name
+        pred_path = pred_dir / f"{name}_predict.npz"
+        if not target_path.exists() or not pred_path.exists():
+            bad.append((name, "missing_file"))
+            continue
+
+        d = np.load(target_path, allow_pickle=True)
+        p = np.load(pred_path, allow_pickle=True)["P"]
+
+        y = d["Y_pwm"][0]
+        pwm_mask = make_mask(d["pwm_mask"][0], len(y))
+        dna_mask = make_mask(d["dna_mask"][0], len(p))
+
+        y_m = y[pwm_mask]
+        p_m = p[dna_mask]
+
+        if len(y_m) != len(p_m):
+            bad.append((name, f"length_mismatch target={len(y_m)} pred={len(p_m)}"))
+            continue
+
+        mae = float(np.mean(np.sum(np.abs(p_m - y_m), axis=1)))
+        rows[name] = mae
+    return rows, bad
+
+results = {}
+for group, pred_dir in groups.items():
+    rows, bad = eval_group(pred_dir)
+    results[group] = rows
+    vals = np.array(list(rows.values()), dtype=float)
+    print("====", group, "====")
+    print("n", len(vals), "bad", len(bad))
+    print("median", float(np.median(vals)))
+    print("lower_quartile", float(np.percentile(vals, 25)))
+    print("upper_quartile", float(np.percentile(vals, 75)))
+    print("mean", float(np.mean(vals)))
+    if bad:
+        print("bad_examples", bad[:10])
+
+common = sorted(set(results["baseline_filtered"]) & set(results["contact_aware"]))
+deltas = np.array([
+    results["contact_aware"][name] - results["baseline_filtered"][name]
+    for name in common
+], dtype=float)
+
+print("==== paired_delta contact_aware_minus_baseline ====")
+print("n_common", len(common))
+print("mean_delta", float(np.mean(deltas)))
+print("median_delta", float(np.median(deltas)))
+print("contact_aware_better_count", int((deltas < 0).sum()))
+print("baseline_better_count", int((deltas > 0).sum()))
+print("tie_count", int((deltas == 0).sum()))
+PY
+```
+
+### 14.5 benchmark 判定
+
+| benchmark 结果 | 解释 |
+|---|---|
+| contact-aware mean/median MAE 更低，paired better count 更高 | internal gain 转成外部收益 |
+| mean/median 接近，但 paired better count 接近 50/50 | 外部收益弱，hard contact-aware 只能算中性 |
+| contact-aware 更差 | internal gain 没泛化到 independent benchmark，需要回看 alignment 定义 |
+
+如果 contact-aware 在 official `id.txt` target 下也赢，这是比较强的信号，因为这个 benchmark target 仍是 DeepPBS 官方旧 alignment 口径。
+
+## 15. 最小结论标准
 
 只有同时满足下面条件，才算这轮实验有效：
 

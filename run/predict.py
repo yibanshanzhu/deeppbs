@@ -80,12 +80,21 @@ elif C['readout'] == "shape" and C['condition'] == "prot_shape":
     modelname = "ShapeReadout"
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
-checkpoints = [l.strip() for l in open(script_dir + "/plot_scripts/txts/{}.txt".format(modelname),"r").readlines()]
-#print(checkpoints)
+checkpoint_dirs = C.get("checkpoint_dirs")
+if checkpoint_dirs:
+    checkpoint_dirs = [
+        os.path.expandvars(os.path.expanduser(item))
+        for item in checkpoint_dirs
+    ]
+    scalers = [pickle.load(open(ospj(item, "scaler.pkl"), "rb")) for item in checkpoint_dirs]
+    checkpoints = [ospj(item, "Model.best.tar") for item in checkpoint_dirs]
+else:
+    checkpoints = [l.strip() for l in open(script_dir + "/plot_scripts/txts/{}.txt".format(modelname),"r").readlines()]
+    #print(checkpoints)
 
-scalers=[pickle.load(open(script_dir + "/output/{}/scaler.pkl".format(item),"rb")) for item in checkpoints]
+    scalers=[pickle.load(open(script_dir + "/output/{}/scaler.pkl".format(item),"rb")) for item in checkpoints]
 
-checkpoints = [ospj(script_dir+"/output", item, "Model.best.tar") for item in checkpoints]
+    checkpoints = [ospj(script_dir+"/output", item, "Model.best.tar") for item in checkpoints]
 
 DLs = []
 
