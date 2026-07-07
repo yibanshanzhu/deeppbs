@@ -167,62 +167,127 @@ benchmark 列表通常是：
 run/folds/id.txt
 ```
 
-如果使用已有 checkpoint 做 benchmark，注意第一性原则：
+原始 DeepPBS 的预测风格不是只用单个 checkpoint，而是 5 个模型做 ensemble。
 
 ```text
-评测时的数据 scaler 必须和该 checkpoint 训练时一致。
+5 个 fold 模型 -> 分别预测 -> softmax 输出求平均 -> 合并正反两个方向
 ```
 
-当前 `driver.py` 会用第一个参数的 train list 重新构建 scaler，然后加载 checkpoint。因此测试某个 fold 的 checkpoint 时，第一个参数应该用该 checkpoint 对应的训练列表。
+代码位置是：
 
-示例：用 fold0 的模型评测 benchmark：
+```text
+run/predict.py
+```
+
+以 DeepPBS 主模型为例，5 个 checkpoint 名字来自：
+
+```text
+run/plot_scripts/txts/DeepPBS.txt
+```
+
+每个模型会使用自己训练时保存的 scaler：
+
+```text
+run/output/<run_name>/scaler.pkl
+```
+
+然后加载对应 checkpoint：
+
+```text
+run/output/<run_name>/Model.best.tar
+```
+
+ensemble 的核心逻辑是：
+
+```python
+outputs.append(torch.softmax(model(batch), dim=1))
+output = reduce(lambda x, y: x + y, outputs)
+output = output / len(models)
+```
+
+DeepPBS 还会把正反两个方向合并成最终 PWM：
+
+```python
+idx = output.shape[0] // 2
+output = (output[:idx, :] + np.flip(output[idx:, :])) / 2
+```
+
+也就是说，如果要保持和原始 DeepPBS 一致的 benchmark 风格，应该用：
+
+```text
+5-model ensemble prediction + per-sample MAE evaluation
+```
+
+不是只跑某一个 fold 的单模型 MAE。
+
+当前仓库里的 `run/predict.py` 主要负责生成 ensemble 预测文件，不直接计算 benchmark MAE。因此新增了：
+
+```text
+run/benchmark_per_sample_mae.py
+```
+
+这个脚本复用 `run/predict.py` 的 5-model ensemble 逻辑，然后对每个 id 样本计算 per-sample MAE。
+
+这样最贴近 DeepPBS 原始 inference 流程，也能避免 scaler/checkpoint 混用。
+
+运行命令：
 
 ```bash
 cd run
 
-python -W ignore driver.py \
-  ./folds/train0.txt \
+python -W ignore benchmark_per_sample_mae.py \
   ./folds/id.txt \
   -c config.json \
-  --balance unmasked \
-  --epochs 0 \
-  --eval_every 1 \
-  --single_gpu \
-  --load ./output/<fold0_run_name>/Model.best.tar \
-  --run_name benchmark_fold0_per_sample_mae
+  --model_list ./plot_scripts/txts/DeepPBS.txt \
+  --output ./output/benchmark_per_sample_mae.csv
 ```
 
-结果位置：
+如果用的是其他模型分支，替换 `--model_list`：
 
 ```text
-run/output/benchmark_fold0_per_sample_mae/run.log
-run/output/benchmark_fold0_per_sample_mae/predictions/
+DeepPBS:                ./plot_scripts/txts/DeepPBS.txt
+DeepPBSwithDNAseqInfo:  ./plot_scripts/txts/DeepPBSwithDNAseqInfo.txt
+BaseReadout:            ./plot_scripts/txts/BaseReadout.txt
+ShapeReadout:           ./plot_scripts/txts/ShapeReadout.txt
 ```
 
-`run.log` 中每个 benchmark 样本的 `mae` 已经是该样本自己的 MAE。要得到整个 benchmark 的 mean MAE，应对这些样本级 MAE 再求平均。
-
-## 8. 汇报时建议怎么描述
-
-可以写成：
+输出文件：
 
 ```text
-We changed DeepPBS PWM MAE from column-level averaging to per-sample averaging.
-For each input complex, MAE is first computed over its valid aligned PWM window
-from both DNA directions, and the final benchmark MAE is then averaged across
-complexes. This removes the previous bias where samples with longer aligned
-windows contributed more to the final MAE.
+run/output/benchmark_per_sample_mae.csv
 ```
 
-中文：
+包含字段：
 
 ```text
-我们将 DeepPBS 的 PWM MAE 从 column-level average 改为 per-sample average。
-现在每个复合物样本会先在自己的有效对齐窗口内计算 MAE，再对所有样本等权平均。
-这样避免了长对齐窗口样本在最终 MAE 中权重更大的问题。
+id
+mae
+aligned_len
+pwm_len
+dna_len
+pwm_coverage
+dna_coverage
 ```
 
-同时需要说明：
+终端会同时打印：
 
 ```text
-该指标仍然是 aligned-window MAE，不是完整 motif MAE。
+num_samples
+mean_mae
+output
 ```
+
+需要保留的逻辑包括：
+
+```text
+1. 从 run/plot_scripts/txts/DeepPBS.txt 读取 5 个 run name
+2. 每个 run 加载自己的 scaler.pkl
+3. 每个 run 加载自己的 Model.best.tar
+4. 对同一个 benchmark 样本得到 5 份 softmax prediction
+5. 对 5 份 prediction 求平均
+6. 将 strand0 和 strand1 反向翻回后平均成最终 PWM
+7. 对每个 benchmark 样本单独计算 MAE
+8. 对所有样本 MAE 求平均
+```
+
+正式 benchmark 应保持这个 5-model ensemble 流程。
