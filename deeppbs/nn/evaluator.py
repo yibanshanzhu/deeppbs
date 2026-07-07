@@ -38,6 +38,100 @@ METRICS_FN = {
 def registerMetric(name, fn):
     METRICS_FN[name] = fn
 
+def _to_numpy(array):
+    if hasattr(array, "detach"):
+        return array.detach().cpu().numpy()
+    return np.asarray(array)
+
+def _batch_sample_lengths(batch):
+    # Use PyG's per-key slices so the lengths match x_dna/PWM rows, not another node store.
+    slice_dict = getattr(batch, "_slice_dict", None)
+    if slice_dict is None:
+        slice_dict = getattr(batch, "__slices__", None)
+    if slice_dict is not None and "x_dna" in slice_dict:
+        slices = _to_numpy(slice_dict["x_dna"]).astype(int)
+        return np.diff(slices).astype(int).tolist()
+
+    ptr = getattr(batch, "ptr", None)
+    if ptr is not None:
+        ptr = _to_numpy(ptr).astype(int)
+        return np.diff(ptr).astype(int).tolist()
+    if hasattr(batch, "x_dna"):
+        return [int(batch.x_dna.shape[0])]
+    raise ValueError("Cannot determine per-sample lengths for MAE calculation.")
+
+def _iter_batches(batch_items):
+    if batch_items is None:
+        return []
+    if isinstance(batch_items, list):
+        return batch_items
+    return [batch_items]
+
+def _concat_nonempty(parts):
+    parts = [part for part in parts if part.shape[0] > 0]
+    if len(parts) == 0:
+        return None
+    return np.concatenate(parts, axis=0)
+
+def _samplewise_mae(targets, probs, masks=None, out_masks=None, batches=None):
+    # Compute one MAE per original Data item, which corresponds to one line in the input id file.
+    targets = np.asarray(targets)
+    probs = np.asarray(probs)
+
+    if batches is None:
+        if masks is not None:
+            targets = targets[np.asarray(masks)]
+            probs = probs[np.asarray(out_masks)]
+        return [float(mae(targets, probs))]
+
+    if masks is not None:
+        masks = np.asarray(masks)
+        out_masks = np.asarray(out_masks)
+
+    values = []
+    offset = 0
+    for batch in _iter_batches(batches):
+        lengths = _batch_sample_lengths(batch)
+        batch_length = sum(lengths)
+
+        # Evaluator/model output layout is strand0 for the full batch followed by strand1.
+        y0 = targets[offset:offset + batch_length]
+        y1 = targets[offset + batch_length:offset + 2 * batch_length]
+        p0 = probs[offset:offset + batch_length]
+        p1 = probs[offset + batch_length:offset + 2 * batch_length]
+
+        if masks is not None:
+            m0 = masks[offset:offset + batch_length]
+            m1 = masks[offset + batch_length:offset + 2 * batch_length]
+            om0 = out_masks[offset:offset + batch_length]
+            om1 = out_masks[offset + batch_length:offset + 2 * batch_length]
+
+        sample_start = 0
+        for length in lengths:
+            slc = slice(sample_start, sample_start + length)
+            if masks is None:
+                sample_targets = _concat_nonempty([y0[slc], y1[slc]])
+                sample_probs = _concat_nonempty([p0[slc], p1[slc]])
+            else:
+                # Mask within each sample first, then average samples equally.
+                sample_targets = _concat_nonempty([y0[slc][m0[slc]], y1[slc][m1[slc]]])
+                sample_probs = _concat_nonempty([p0[slc][om0[slc]], p1[slc][om1[slc]]])
+
+            if sample_targets is None or sample_probs is None:
+                values.append(float("nan"))
+            elif sample_targets.shape[0] != sample_probs.shape[0]:
+                raise ValueError("Masked target and prediction lengths differ for MAE calculation.")
+            else:
+                values.append(float(mae(sample_targets, sample_probs)))
+            sample_start += length
+
+        offset += 2 * batch_length
+
+    if offset != targets.shape[0]:
+        raise ValueError("Batch/sample lengths do not match MAE inputs.")
+
+    return values
+
 class Evaluator(object):
     def __init__(self, model, nc, device="cpu", metrics=None, post_process=None, negative_class=0, labels=None):
         self.model = model # must implement the 'forward' method
@@ -287,40 +381,57 @@ class Evaluator(object):
         nan = float('nan')
         for i in range(len(y_gt)):
             if label_type == "graph":
-                y_gt[i] = y_gt[i].flatten()
+                current_y_gt = y_gt[i].flatten()
+            else:
+                current_y_gt = y_gt[i]
             
+            current_outs = outs[i]
+            current_masks = None if masks is None else masks[i]
+            current_out_masks = None if out_masks is None else out_masks[i]
+            current_batches = None if batches is None else batches[i]
             
             if masks is not None and use_mask:    
-                y_gt[i] = y_gt[i][masks[i]]
-                outs[i] = outs[i][out_masks[i]]
+                masked_y_gt = current_y_gt[current_masks]
+                masked_outs = current_outs[current_out_masks]
+            else:
+                masked_y_gt = current_y_gt
+                masked_outs = current_outs
             
             # Compute metrics
             for metric, kw in self.metrics.items():
                 if metric == 'auprc' or metric == 'auroc':
                     # AUC metrics
-                    metric_values[metric].append(METRICS_FN[metric](np.argmax(y_gt[i], axis=1), outs[i], **kw))
+                    metric_values[metric].append(METRICS_FN[metric](np.argmax(masked_y_gt, axis=1), masked_outs, **kw))
                 elif metric == 'ic_weighted_pcc':
                     ic_pccs = []
                     weights = []
-                    for index in range(outs[i].shape[0]):
-                        ic_pcc, weight = METRICS_FN[metric](y_gt[i][index,:], outs[i][index,:], **kw)
+                    for index in range(masked_outs.shape[0]):
+                        ic_pcc, weight = METRICS_FN[metric](masked_y_gt[index,:], masked_outs[index,:], **kw)
                         ic_pccs.append(ic_pcc)
                         weights.append(weight)
                         metric_values[metric].append(np.average(ic_pccs, weights=weights))
-                elif metric in ["ic_corr", "brier_multi", "ic_diff", "mae"]:
-                    metric_values[metric].append(float(METRICS_FN[metric](y_gt[i], outs[i])))
+                elif metric == "mae":
+                    metric_values[metric].extend(_samplewise_mae(
+                        current_y_gt,
+                        current_outs,
+                        masks=current_masks if use_mask else None,
+                        out_masks=current_out_masks if use_mask else None,
+                        batches=current_batches
+                    ))
+                elif metric in ["ic_corr", "brier_multi", "ic_diff"]:
+                    metric_values[metric].append(float(METRICS_FN[metric](masked_y_gt, masked_outs)))
                 elif metric == "matthews_corrcoef":
                     continue
                 elif metric in ['pearsonr','spearmanr']:
                     columnwise = []
                     IC_weights = []
-                    for index in range(outs[i].shape[0]):
-                        columnwise.append(METRICS_FN[metric](y_gt[i][index,:], outs[i][index,:], **kw)[0])
+                    for index in range(masked_outs.shape[0]):
+                        columnwise.append(METRICS_FN[metric](masked_y_gt[index,:], masked_outs[index,:], **kw)[0])
                     
                     metric_values[metric].append(np.average(columnwise))
                 else:
                     #if self.metrics_check[metric](ngt):
-                    metric_values[metric].append(METRICS_FN[metric](y_gt[i], y_pr, **kw))
+                    metric_values[metric].append(METRICS_FN[metric](masked_y_gt, y_pr, **kw))
         with warnings.catch_warnings():
             # ignore empty-slice warnings from numpy
             warnings.simplefilter("ignore")
