@@ -125,6 +125,7 @@ python -W ignore driver.py \
   --balance unmasked \
   --eval_every 1 \
   --single_gpu \
+  --output_path ./output \
   --run_name fold0_per_sample_mae
 ```
 
@@ -133,16 +134,24 @@ python -W ignore driver.py \
 ```bash
 cd run
 
+mkdir -p logs
+
 for i in 0 1 2 3 4
 do
-  python -W ignore driver.py \
+  echo "===== fold ${i} start $(date) =====" | tee logs/fold${i}_per_sample_mae.log
+
+  PYTHONUNBUFFERED=1 python -u -W ignore driver.py \
     ./folds/train${i}.txt \
     ./folds/valid${i}.txt \
     -c config.json \
     --balance unmasked \
     --eval_every 1 \
     --single_gpu \
-    --run_name fold${i}_per_sample_mae
+    --output_path ./output \
+    --run_name fold${i}_per_sample_mae \
+    2>&1 | tee -a logs/fold${i}_per_sample_mae.log
+
+  echo "===== fold ${i} end $(date) =====" | tee -a logs/fold${i}_per_sample_mae.log
 done
 ```
 
